@@ -27,6 +27,9 @@ dependencies = [
   "tqdm",
   "PyYAML",
   "transforms3d>=0.4.1,<0.5",
+  "scipy>=1.16.3",
+  "smplx>=0.1.28",
+  "colour>=0.1.5",
 ]
 
 [project.optional-dependencies]
