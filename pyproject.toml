@@ -21,7 +21,9 @@ classifiers = [
 ]
 dependencies = [
   "numpy",
-  "torch>=2.5,<2.6",
+  "torch>=2.6.0",
+  "torchvision",
+  "torchaudio",
   "omegaconf",
   "loguru",
   "tqdm",
@@ -30,6 +32,29 @@ dependencies = [
   "scipy>=1.16.3",
   "smplx>=0.1.28",
   "colour>=0.1.5",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+
+[tool.uv.sources]
+# Cross-platform support: CUDA on Linux/Windows, CPU on macOS
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+    { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+    { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+    { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" },
 ]
 
 [project.optional-dependencies]
