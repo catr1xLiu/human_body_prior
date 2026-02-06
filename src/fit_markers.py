@@ -32,17 +32,14 @@ import json
 import argparse
 import glob
 from pathlib import Path
-from collections import defaultdict
 
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
-from scipy.ndimage import gaussian_filter1d
 
 # Import human_body_prior components
 from human_body_prior.body_model.body_model import BodyModel
 from human_body_prior.models.ik_engine import IK_Engine
-from human_body_prior.tools.omni_tools import copy2cpu as c2c
 from human_body_prior.tools.omni_tools import get_support_data_dir
 
 # Import marker mapping utilities from same package
@@ -79,9 +76,7 @@ def vicon_to_smpl_coords(points, vicon_up="Z", vicon_forward="Y"):
     elif vicon_up == "Y" and vicon_forward == "X":
         rot = R.from_euler("y", 90, degrees=True).as_matrix()
     else:
-        raise ValueError(
-            f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}"
-        )
+        raise ValueError(f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}")
 
     original_shape = points.shape
     points_flat = points.reshape(-1, 3)
@@ -177,9 +172,7 @@ def map_markers_to_vertex_ids(marker_names):
     return vids, canonical_names, valid_indices
 
 
-def prepare_markers_for_fitting(
-    markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"
-):
+def prepare_markers_for_fitting(markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"):
     """
     Prepare marker data for IK fitting.
 
@@ -262,16 +255,10 @@ def create_source_keypoints(bm_fname, vids, device):
     class SourceKeyPoints(nn.Module):
         def __init__(self, bm, vids, kpts_colors=None):
             super().__init__()
-            self.bm = (
-                BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
-            )
+            self.bm = BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
             self.bm_f = []  # self.bm.f
             self.vids = vids
-            self.kpts_colors = (
-                np.array([Color("grey").rgb for _ in vids])
-                if kpts_colors is None
-                else kpts_colors
-            )
+            self.kpts_colors = np.array([Color("grey").rgb for _ in vids]) if kpts_colors is None else kpts_colors
 
         def forward(self, body_parms):
             new_body = self.bm(**body_parms)
@@ -324,9 +311,7 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
         for start in range(0, T, batch_size):
             end = min(start + batch_size, T)
             chunks.append((start, end))
-        print(
-            f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames"
-        )
+        print(f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames")
     else:
         chunks = [(0, T)]
 
@@ -334,7 +319,7 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
 
     # Configuration from ik_example_mocap.py
     data_loss = torch.nn.MSELoss(reduction="sum")
-    stepwise_weights = [{"data": 10.0, "poZ_body": 0.01, "betas": 0.5}]
+    stepwise_weights = [{"data": 10.0, "poZ_body": 0.03, "betas": 0.5}]
     optimizer_args = {
         "type": "LBFGS",
         "max_iter": 300,
@@ -501,15 +486,9 @@ Examples:
     )
     parser.add_argument("--subject", default=None, help="Process specific subject only")
     parser.add_argument("--trial", default=None, help="Process specific trial only")
-    parser.add_argument(
-        "--device", default="cuda", choices=["cpu", "cuda"], help="Device to use"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=128, help="Maximum frames per batch"
-    )
-    parser.add_argument(
-        "--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis"
-    )
+    parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"], help="Device to use")
+    parser.add_argument("--batch_size", type=int, default=128, help="Maximum frames per batch")
+    parser.add_argument("--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis")
     parser.add_argument(
         "--vicon_forward",
         default="Y",
@@ -591,30 +570,20 @@ Examples:
 
             # Load marker data
             markers_np, marker_names, fps = load_markers_npz(npz_path)
-            print(
-                f"  Frames: {markers_np.shape[0]}, Markers: {len(marker_names)}, FPS: {fps}"
-            )
+            print(f"  Frames: {markers_np.shape[0]}, Markers: {len(marker_names)}, FPS: {fps}")
 
             # Map markers to vertex IDs
-            vids, canonical_names, valid_indices = map_markers_to_vertex_ids(
-                marker_names
-            )
+            vids, canonical_names, valid_indices = map_markers_to_vertex_ids(marker_names)
 
             if len(vids) < 10:
-                print(
-                    f"  Warning: Only {len(vids)} markers mapped. Fitting may be poor."
-                )
+                print(f"  Warning: Only {len(vids)} markers mapped. Fitting may be poor.")
 
             # Prepare markers for fitting
-            markers_torch = prepare_markers_for_fitting(
-                markers_np, valid_indices, args.vicon_up, args.vicon_forward
-            )
+            markers_torch = prepare_markers_for_fitting(markers_np, valid_indices, args.vicon_up, args.vicon_forward)
 
             # Fit SMPL parameters using IK_Engine
             print(f"  Fitting SMPL parameters...")
-            result = fit_sequence_with_ik_engine(
-                markers_torch, vids, bm_fname, device, args.batch_size
-            )
+            result = fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, args.batch_size)
 
             # Store betas for averaging
             betas_list.append(result["betas"])
@@ -632,9 +601,7 @@ Examples:
             # Compute joints from SMPL for compatibility
             poses_torch = torch.from_numpy(poses72).float().to(device)
             trans_torch = torch.from_numpy(result["trans"]).float().to(device)
-            betas_torch = (
-                torch.from_numpy(result["betas"]).float().unsqueeze(0).to(device)
-            )
+            betas_torch = torch.from_numpy(result["betas"]).float().unsqueeze(0).to(device)
 
             # Expand betas to match frames
             betas_expanded = betas_torch.expand(poses_torch.shape[0], -1)
