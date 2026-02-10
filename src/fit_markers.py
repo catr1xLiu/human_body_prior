@@ -559,7 +559,8 @@ Examples:
             out_trial = subj_out_dir / f"{trial_safe}_smpl_params.npz"
             report_path = subj_out_dir / f"{trial_safe}_smpl_metadata.json"
 
-            if out_trial.exists():
+            # skip if already fitted, overwrite if one trial specified
+            if out_trial.exists() and not args.trial:
                 print(f"[{subj}] {trial_name}: already fitted")
                 # Load existing betas to include in average
                 existing_data = np.load(out_trial, allow_pickle=True)
