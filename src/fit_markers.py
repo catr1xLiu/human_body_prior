@@ -3,28 +3,14 @@
 """
 SMPL fitting using human_body_prior IK_Engine for Van Criekinge dataset.
 
-This script replaces the custom optimization in 2_fit_smpl_markers.py with
-the human_body_prior library's IK_Engine, which uses VPoser prior for
-more robust SMPL parameter estimation.
-
-The script performs inverse kinematics (IK) to fit SMPL body model parameters
-to motion capture marker data from the Van Criekinge dataset. It uses the
-VPoser variational autoencoder as a pose prior to ensure natural human poses.
-
-Key features:
-- Maps Van Criekinge marker names to SMPL vertex IDs using labels_map.py
-- Converts Vicon coordinate system (Z-up, Y-forward) to SMPL (Y-up, Z-forward)
-- Uses human_body_prior IK_Engine with VPoser v2.05 model
-- Outputs SMPL parameters in same format as original pipeline
-- Includes metadata JSON files with mapping information
+This script fits SMPL body model parameters to a single marker NPZ file.
+It uses human_body_prior's IK_Engine with VPoser v2.05 prior.
 
 Usage:
     python -m human_body_prior.src.fit_markers \
-        --processed_dir data/processed_markers_all_2 \
-        --models_dir data/smpl \
-        --out_dir data/fitted_smpl_all_3
-
-Compatible with the same CLI arguments as 2_fit_smpl_markers.py.
+        --input path/to/markers.npz \
+        --output path/to/output.npz \
+        --models_dir data/smpl
 """
 
 import os
@@ -76,7 +62,9 @@ def vicon_to_smpl_coords(points, vicon_up="Z", vicon_forward="Y"):
     elif vicon_up == "Y" and vicon_forward == "X":
         rot = R.from_euler("y", 90, degrees=True).as_matrix()
     else:
-        raise ValueError(f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}")
+        raise ValueError(
+            f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}"
+        )
 
     original_shape = points.shape
     points_flat = points.reshape(-1, 3)
@@ -172,7 +160,9 @@ def map_markers_to_vertex_ids(marker_names):
     return vids, canonical_names, valid_indices
 
 
-def prepare_markers_for_fitting(markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"):
+def prepare_markers_for_fitting(
+    markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"
+):
     """
     Prepare marker data for IK fitting.
 
@@ -255,10 +245,16 @@ def create_source_keypoints(bm_fname, vids, device):
     class SourceKeyPoints(nn.Module):
         def __init__(self, bm, vids, kpts_colors=None):
             super().__init__()
-            self.bm = BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
+            self.bm = (
+                BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
+            )
             self.bm_f = []  # self.bm.f
             self.vids = vids
-            self.kpts_colors = np.array([Color("grey").rgb for _ in vids]) if kpts_colors is None else kpts_colors
+            self.kpts_colors = (
+                np.array([Color("grey").rgb for _ in vids])
+                if kpts_colors is None
+                else kpts_colors
+            )
 
         def forward(self, body_parms):
             new_body = self.bm(**body_parms)
@@ -311,7 +307,9 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
         for start in range(0, T, batch_size):
             end = min(start + batch_size, T)
             chunks.append((start, end))
-        print(f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames")
+        print(
+            f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames"
+        )
     else:
         chunks = [(0, T)]
 
@@ -419,76 +417,136 @@ def pick_gender(subject_meta):
     return g if g in ("male", "female") else "neutral"
 
 
-def subject_cache_paths(out_root, subject_id):
+def run_fitting(
+    input_path,
+    output_path,
+    models_dir,
+    device="cuda",
+    batch_size=128,
+    vicon_up="Z",
+    vicon_forward="Y",
+):
     """
-    Create subject-specific output paths.
-
-    Args:
-        out_root: Root output directory
-        subject_id: Subject ID string (e.g., 'SUBJ01')
-
-    Returns:
-        tuple: (subj_dir, betas_path)
-            - subj_dir: Path to subject-specific output directory
-            - betas_path: Path to betas.npy file for this subject
-
-    Note:
-        Creates the subject directory if it doesn't exist.
+    Fit SMPL parameters to a single marker NPZ file.
     """
-    subj_dir = Path(out_root) / subject_id
-    subj_dir.mkdir(parents=True, exist_ok=True)
-    return subj_dir, subj_dir / "betas.npy"
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path = output_path.with_suffix(".json")
+
+    # Setup device
+    if device == "cuda" and torch.cuda.is_available():
+        dev = torch.device("cuda")
+    else:
+        dev = torch.device("cpu")
+
+    subj_dir = input_path.parent
+    subj = subj_dir.name
+    trial_name = input_path.stem.replace("_markers_positions", "")
+
+    # Load subject metadata for gender
+    meta_files = sorted(glob.glob(str(subj_dir / "*_metadata.json")))
+    gender = "neutral"
+    if meta_files:
+        with open(meta_files[0], "r") as f:
+            subj_meta = json.load(f)
+        gender = pick_gender(subj_meta)
+
+    # Load SMPL model
+    smpl_model, bm_fname = build_smpl_model(models_dir, gender, dev)
+
+    # Load marker data
+    markers_np, marker_names, fps = load_markers_npz(input_path)
+
+    # Map markers to vertex IDs
+    vids, canonical_names, valid_indices = map_markers_to_vertex_ids(marker_names)
+
+    # Prepare markers for fitting
+    markers_torch = prepare_markers_for_fitting(
+        markers_np, valid_indices, vicon_up, vicon_forward
+    )
+
+    # Fit SMPL parameters using IK_Engine
+    result = fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, dev, batch_size)
+
+    # Prepare output
+    poses72 = np.concatenate(
+        [
+            result["root_orient"],
+            result["pose_body"],
+            np.zeros((result["pose_body"].shape[0], 6)),
+        ],
+        axis=1,
+    )
+
+    # Compute joints
+    poses_torch = torch.from_numpy(poses72).float().to(dev)
+    trans_torch = torch.from_numpy(result["trans"]).float().to(dev)
+    betas_torch = torch.from_numpy(result["betas"]).float().unsqueeze(0).to(dev)
+    betas_expanded = betas_torch.expand(poses_torch.shape[0], -1)
+
+    with torch.no_grad():
+        body = smpl_model(
+            pose_body=poses_torch[:, 3:66],
+            betas=betas_expanded,
+            trans=trans_torch,
+            root_orient=poses_torch[:, :3],
+        )
+        joints = body.Jtr.detach().cpu().numpy()
+
+    np.savez(
+        output_path,
+        poses=poses72.astype(np.float32),
+        trans=result["trans"].astype(np.float32),
+        betas=result["betas"].astype(np.float32),
+        gender=gender,
+        subject_id=subj,
+        trial_name=trial_name,
+        fps=fps,
+        n_frames=result["trans"].shape[0],
+        joints=joints.astype(np.float32),
+    )
+
+    # Save metadata report
+    report = {
+        "subject_id": subj,
+        "trial_name": trial_name,
+        "gender": gender,
+        "frames_fitted": int(markers_torch.shape[0]),
+        "fps": fps,
+        "markers_used": canonical_names,
+        "vertex_ids": vids,
+        "settings": {
+            "vicon_up": vicon_up,
+            "vicon_forward": vicon_forward,
+            "batch_size": batch_size,
+            "device": str(dev),
+        },
+    }
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"[{subj}] Finished {trial_name} -> {output_path.name}")
+    return result["betas"]
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fit SMPL parameters to Van Criekinge markers using human_body_prior",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Process all subjects
-  python -m human_body_prior.src.fit_markers \\
-    --processed_dir data/processed_markers_all_2 \\
-    --models_dir data/smpl \\
-    --out_dir data/fitted_smpl_all_3
-  
-  # Process specific subject
-  python -m human_body_prior.src.fit_markers \\
-    --processed_dir data/processed_markers_all_2 \\
-    --models_dir data/smpl \\
-    --out_dir data/fitted_smpl_all_3 \\
-    --subject SUBJ01
-  
-  # Process specific trial
-  python -m human_body_prior.src.fit_markers \\
-    --processed_dir data/processed_markers_all_2 \\
-    --models_dir data/smpl \\
-    --out_dir data/fitted_smpl_all_3 \\
-    --subject SUBJ01 --trial SUBJ1_0
-        """,
+        description="Fit SMPL parameters to a single Van Criekinge marker NPZ file using human_body_prior",
     )
 
-    # Same arguments as 2_fit_smpl_markers.py
+    parser.add_argument("--input", required=True, help="Path to input marker NPZ")
+    parser.add_argument("--output", required=True, help="Path to output SMPL NPZ")
+    parser.add_argument("--models_dir", required=True, help="Path to SMPL models")
     parser.add_argument(
-        "--processed_dir",
-        required=True,
-        help="Path to processed markers (typically data/processed_markers_all_2/)",
+        "--device", default="cuda", choices=["cpu", "cuda"], help="Device to use"
     )
     parser.add_argument(
-        "--models_dir",
-        required=True,
-        help="Path to SMPL models directory (typically data/smpl/)",
+        "--batch_size", type=int, default=128, help="Maximum frames per batch"
     )
     parser.add_argument(
-        "--out_dir",
-        required=True,
-        help="Output directory for fitted SMPL parameters (typically data/fitted_smpl_all_3/)",
+        "--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis"
     )
-    parser.add_argument("--subject", default=None, help="Process specific subject only")
-    parser.add_argument("--trial", default=None, help="Process specific trial only")
-    parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"], help="Device to use")
-    parser.add_argument("--batch_size", type=int, default=128, help="Maximum frames per batch")
-    parser.add_argument("--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis")
     parser.add_argument(
         "--vicon_forward",
         default="Y",
@@ -498,169 +556,15 @@ Examples:
 
     args = parser.parse_args()
 
-    # Setup device
-    if args.device == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = torch.device("cpu")
-        print("Using CPU")
-
-    # Create output directory
-    processed_dir = Path(args.processed_dir)
-    out_root = Path(args.out_dir)
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    # Find subjects to process
-    if args.subject:
-        subjects = [args.subject]
-    else:
-        subjects = sorted([p.name for p in processed_dir.iterdir() if p.is_dir()])
-
-    print(f"Found {len(subjects)} subjects to process")
-
-    for subj in subjects:
-        subj_dir = processed_dir / subj
-        npz_files = sorted(glob.glob(str(subj_dir / "*_markers_positions.npz")))
-
-        if not npz_files:
-            print(f"[{subj}] No marker files found — skipping")
-            continue
-
-        subj_out_dir, betas_path = subject_cache_paths(out_root, subj)
-
-        # Load subject metadata for gender
-        meta_files = sorted(glob.glob(str(subj_dir / "*_metadata.json")))
-        gender = "neutral"
-        if meta_files:
-            with open(meta_files[0], "r") as f:
-                subj_meta = json.load(f)
-            gender = pick_gender(subj_meta)
-        print(f"[{subj}] gender={gender}")
-
-        # Load SMPL model
-        smpl_model, bm_fname = build_smpl_model(args.models_dir, gender, device)
-
-        # Filter trials if specified
-        if args.trial:
-            npz_files = [p for p in npz_files if Path(p).stem.startswith(args.trial)]
-            if not npz_files:
-                print(f"[{subj}] Trial {args.trial} not found")
-                continue
-
-        # Track betas across trials for this subject
-        subject_betas = None
-        betas_list = []
-
-        # Process each trial
-        for npz_path in npz_files:
-            trial_name = Path(npz_path).stem.replace("_markers_positions", "")
-            trial_safe = sanitize(trial_name)
-            out_trial = subj_out_dir / f"{trial_safe}_smpl_params.npz"
-            report_path = subj_out_dir / f"{trial_safe}_smpl_metadata.json"
-
-            # skip if already fitted, overwrite if one trial specified
-            if out_trial.exists() and not args.trial:
-                print(f"[{subj}] {trial_name}: already fitted")
-                # Load existing betas to include in average
-                existing_data = np.load(out_trial, allow_pickle=True)
-                betas_list.append(existing_data["betas"])
-                continue
-
-            print(f"[{subj}] Processing {trial_name}")
-
-            # Load marker data
-            markers_np, marker_names, fps = load_markers_npz(npz_path)
-            print(f"  Frames: {markers_np.shape[0]}, Markers: {len(marker_names)}, FPS: {fps}")
-
-            # Map markers to vertex IDs
-            vids, canonical_names, valid_indices = map_markers_to_vertex_ids(marker_names)
-
-            if len(vids) < 10:
-                print(f"  Warning: Only {len(vids)} markers mapped. Fitting may be poor.")
-
-            # Prepare markers for fitting
-            markers_torch = prepare_markers_for_fitting(markers_np, valid_indices, args.vicon_up, args.vicon_forward)
-
-            # Fit SMPL parameters using IK_Engine
-            print(f"  Fitting SMPL parameters...")
-            result = fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, args.batch_size)
-
-            # Store betas for averaging
-            betas_list.append(result["betas"])
-
-            # Prepare output in same format as original script
-            poses72 = np.concatenate(
-                [
-                    result["root_orient"],
-                    result["pose_body"],
-                    np.zeros((result["pose_body"].shape[0], 6)),
-                ],
-                axis=1,
-            )
-
-            # Compute joints from SMPL for compatibility
-            poses_torch = torch.from_numpy(poses72).float().to(device)
-            trans_torch = torch.from_numpy(result["trans"]).float().to(device)
-            betas_torch = torch.from_numpy(result["betas"]).float().unsqueeze(0).to(device)
-
-            # Expand betas to match frames
-            betas_expanded = betas_torch.expand(poses_torch.shape[0], -1)
-
-            # Get SMPL model
-            smpl_model, _ = build_smpl_model(args.models_dir, gender, device)
-
-            # Compute joints
-            with torch.no_grad():
-                body = smpl_model(
-                    pose_body=poses_torch[:, 3:66],
-                    betas=betas_expanded,
-                    trans=trans_torch,
-                    root_orient=poses_torch[:, :3],
-                )
-                joints = body.Jtr.detach().cpu().numpy()
-
-            np.savez(
-                out_trial,
-                poses=poses72.astype(np.float32),
-                trans=result["trans"].astype(np.float32),
-                betas=result["betas"].astype(np.float32),
-                gender=gender,
-                subject_id=subj,
-                trial_name=trial_name,
-                fps=fps,
-                n_frames=result["trans"].shape[0],
-                joints=joints.astype(np.float32),
-            )
-
-            # Save metadata report
-            report = {
-                "subject_id": subj,
-                "trial_name": trial_name,
-                "gender": gender,
-                "frames_fitted": int(markers_torch.shape[0]),
-                "fps": fps,
-                "markers_used": canonical_names,
-                "vertex_ids": vids,
-                "settings": {
-                    "vicon_up": args.vicon_up,
-                    "vicon_forward": args.vicon_forward,
-                    "batch_size": args.batch_size,
-                    "device": str(device),
-                },
-            }
-            with open(report_path, "w") as f:
-                json.dump(report, f, indent=2)
-
-            print(f"[{subj}] Saved {out_trial.name}")
-
-        # Save average betas for the subject (for compatibility with visualization)
-        if betas_list:
-            avg_betas = np.mean(np.stack(betas_list, axis=0), axis=0)
-            np.save(betas_path, avg_betas)
-            print(f"[{subj}] Saved average betas to {betas_path.name}")
-
-    print("Processing complete!")
+    run_fitting(
+        input_path=args.input,
+        output_path=args.output,
+        models_dir=args.models_dir,
+        device=args.device,
+        batch_size=args.batch_size,
+        vicon_up=args.vicon_up,
+        vicon_forward=args.vicon_forward,
+    )
 
 
 if __name__ == "__main__":
