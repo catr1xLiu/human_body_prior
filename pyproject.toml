@@ -32,6 +32,7 @@ dependencies = [
   "scipy>=1.16.3",
   "smplx>=0.1.28",
   "colour>=0.1.5",
+  "progressbar2>=4.5.0",
 ]
 
 [[tool.uv.index]]

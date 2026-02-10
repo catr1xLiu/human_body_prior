@@ -320,7 +320,7 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
     stepwise_weights = [{"data": 10.0, "poZ_body": 0.03, "betas": 0.5}]
     optimizer_args = {
         "type": "LBFGS",
-        "max_iter": 300,
+        "max_iter": 400,
         "lr": 1,
         "tolerance_change": 1e-4,
         "history_size": 200,
@@ -447,10 +447,11 @@ def run_fitting(
     # Load subject metadata for gender
     meta_files = sorted(glob.glob(str(subj_dir / "*_metadata.json")))
     gender = "neutral"
+    meta_data = {}
     if meta_files:
         with open(meta_files[0], "r") as f:
-            subj_meta = json.load(f)
-        gender = pick_gender(subj_meta)
+            meta_data = json.load(f)
+        gender = pick_gender(meta_data)
 
     # Load SMPL model
     smpl_model, bm_fname = build_smpl_model(models_dir, gender, dev)
@@ -500,11 +501,23 @@ def run_fitting(
         trans=result["trans"].astype(np.float32),
         betas=result["betas"].astype(np.float32),
         gender=gender,
-        subject_id=subj,
         trial_name=trial_name,
         fps=fps,
         n_frames=result["trans"].shape[0],
         joints=joints.astype(np.float32),
+        **{
+            k: v
+            for k, v in meta_data.items()
+            if k
+            not in [
+                "marker_names",
+                "marker_layout",
+                "trial_name",
+                "gender",
+                "frame_rate",
+                "n_frames",
+            ]
+        },
     )
 
     # Save metadata report
@@ -522,7 +535,21 @@ def run_fitting(
             "batch_size": batch_size,
             "device": str(dev),
         },
+        "subject_metadata": {
+            k: v
+            for k, v in meta_data.items()
+            if k
+            not in [
+                "marker_names",
+                "marker_layout",
+                "trial_name",
+                "gender",
+                "frame_rate",
+                "n_frames",
+            ]
+        },
     }
+
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
