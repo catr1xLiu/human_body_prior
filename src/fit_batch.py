@@ -108,13 +108,12 @@ def worker_task(task_args):
         batch_size,
         vicon_up,
         vicon_forward,
-        log_dir,
+        log_path,
         task_id,
         pbar,
     ) = task_args
 
-    trial_name = Path(input_path).stem.replace("_markers_positions", "")
-    log_file = Path(log_dir) / f"{trial_name}.log"
+    log_file = Path(log_path)
 
     cmd = [
         "uv",
@@ -248,14 +247,18 @@ def main():
             trial_name = Path(npz_path).stem.replace("_markers_positions", "")
             trial_safe = sanitize(trial_name)
             output_path = subj_out_dir / f"{trial_safe}_smpl_params.npz"
+            log_path = subj_out_dir / f"{trial_safe}_optimizer.log"
 
             if output_path.exists():
                 continue
+
+            subj_out_dir.mkdir(parents=True, exist_ok=True)
 
             tasks_data.append(
                 {
                     "input_path": str(npz_path),
                     "output_path": str(output_path),
+                    "log_path": str(log_path),
                     "trial_name": trial_name,
                 }
             )
@@ -304,7 +307,7 @@ def main():
                 args.batch_size,
                 args.vicon_up,
                 args.vicon_forward,
-                str(log_dir),
+                t["log_path"],
                 task_idx,
                 pbar,
             )
@@ -330,7 +333,6 @@ def main():
     print(
         f"Batch processing complete: {success_count}/{len(tasks_data)} trials succeeded."
     )
-    print(f"Logs are available at: {log_dir}")
 
 
 if __name__ == "__main__":
