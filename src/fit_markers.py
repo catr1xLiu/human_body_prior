@@ -62,9 +62,7 @@ def vicon_to_smpl_coords(points, vicon_up="Z", vicon_forward="Y"):
     elif vicon_up == "Y" and vicon_forward == "X":
         rot = R.from_euler("y", 90, degrees=True).as_matrix()
     else:
-        raise ValueError(
-            f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}"
-        )
+        raise ValueError(f"Unsupported Vicon convention: up={vicon_up}, forward={vicon_forward}")
 
     original_shape = points.shape
     points_flat = points.reshape(-1, 3)
@@ -160,9 +158,7 @@ def map_markers_to_vertex_ids(marker_names):
     return vids, canonical_names, valid_indices
 
 
-def prepare_markers_for_fitting(
-    markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"
-):
+def prepare_markers_for_fitting(markers_np, valid_indices, vicon_up="Z", vicon_forward="Y"):
     """
     Prepare marker data for IK fitting.
 
@@ -234,27 +230,41 @@ def create_source_keypoints(bm_fname, vids, device):
     from torch import nn
 
     def compute_vertex_normal_batched(vertices, indices):
-        from pytorch3d.structures import Meshes
+        """
+        Compute per-vertex normals for a batch of meshes.
 
-        return (
-            Meshes(verts=vertices, faces=indices.expand(len(vertices), -1, -1))
-            .verts_normals_packed()
-            .view(-1, vertices.shape[1], 3)
-        )
+        Args:
+            vertices: Tensor of shape (B, V, 3)
+            indices: Tensor of shape (F, 3) with face indices
+
+        Returns:
+            Tensor of shape (B, V, 3) with unit vertex normals
+        """
+        if indices.dim() == 3:
+            faces = indices[0]
+        else:
+            faces = indices
+
+        v0 = vertices[:, faces[:, 0], :]
+        v1 = vertices[:, faces[:, 1], :]
+        v2 = vertices[:, faces[:, 2], :]
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=-1)
+
+        batch_size, num_verts, _ = vertices.shape
+        vert_normals = torch.zeros_like(vertices)
+        vert_normals.index_add_(1, faces[:, 0], face_normals)
+        vert_normals.index_add_(1, faces[:, 1], face_normals)
+        vert_normals.index_add_(1, faces[:, 2], face_normals)
+
+        return torch.nn.functional.normalize(vert_normals, dim=-1, eps=1e-8)
 
     class SourceKeyPoints(nn.Module):
         def __init__(self, bm, vids, kpts_colors=None):
             super().__init__()
-            self.bm = (
-                BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
-            )
+            self.bm = BodyModel(bm, persistant_buffer=False) if isinstance(bm, str) else bm
             self.bm_f = []  # self.bm.f
             self.vids = vids
-            self.kpts_colors = (
-                np.array([Color("grey").rgb for _ in vids])
-                if kpts_colors is None
-                else kpts_colors
-            )
+            self.kpts_colors = np.array([Color("grey").rgb for _ in vids]) if kpts_colors is None else kpts_colors
 
         def forward(self, body_parms):
             new_body = self.bm(**body_parms)
@@ -307,9 +317,7 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
         for start in range(0, T, batch_size):
             end = min(start + batch_size, T)
             chunks.append((start, end))
-        print(
-            f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames"
-        )
+        print(f"  Splitting {T} frames into {len(chunks)} chunks of max {batch_size} frames")
     else:
         chunks = [(0, T)]
 
@@ -317,7 +325,13 @@ def fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, device, batch_siz
 
     # Configuration from ik_example_mocap.py
     data_loss = torch.nn.MSELoss(reduction="sum")
-    stepwise_weights = [{"data": 10.0, "poZ_body": 0.03, "betas": 0.5}]
+    stepwise_weights = [
+        {
+            "data": 10.00,  # Normal data matching
+            "betas": 0.04,  # Small penalty for beta
+            "poZ_body": 0.02,  # Near zero penalty for movement
+        },
+    ]
     optimizer_args = {
         "type": "LBFGS",
         "max_iter": 400,
@@ -463,9 +477,7 @@ def run_fitting(
     vids, canonical_names, valid_indices = map_markers_to_vertex_ids(marker_names)
 
     # Prepare markers for fitting
-    markers_torch = prepare_markers_for_fitting(
-        markers_np, valid_indices, vicon_up, vicon_forward
-    )
+    markers_torch = prepare_markers_for_fitting(markers_np, valid_indices, vicon_up, vicon_forward)
 
     # Fit SMPL parameters using IK_Engine
     result = fit_sequence_with_ik_engine(markers_torch, vids, bm_fname, dev, batch_size)
@@ -565,15 +577,9 @@ def main():
     parser.add_argument("--input", required=True, help="Path to input marker NPZ")
     parser.add_argument("--output", required=True, help="Path to output SMPL NPZ")
     parser.add_argument("--models_dir", required=True, help="Path to SMPL models")
-    parser.add_argument(
-        "--device", default="cuda", choices=["cpu", "cuda"], help="Device to use"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=128, help="Maximum frames per batch"
-    )
-    parser.add_argument(
-        "--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis"
-    )
+    parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"], help="Device to use")
+    parser.add_argument("--batch_size", type=int, default=128, help="Maximum frames per batch")
+    parser.add_argument("--vicon_up", default="Z", choices=["X", "Y", "Z"], help="Vicon up axis")
     parser.add_argument(
         "--vicon_forward",
         default="Y",

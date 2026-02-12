@@ -72,30 +72,66 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 
-def update_individual_progress(log_file, task_id, pbar):
+SPINNER_OPTS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+def update_individual_progress(log_file, task_id, pbar, overall_pbar, trial_name, pos):
     """Monitor a log file and update the tqdm progress bar"""
     last_iter = 0
+    spinner_idx = 0
     while task_id in active_processes:
         try:
+            # Update spinner in description
+            spinner = SPINNER_OPTS[spinner_idx % len(SPINNER_OPTS)]
+            pbar.set_description(f"{spinner} Worker {pos:2d}: {trial_name[:15]}")
+            spinner_idx += 1
+
             if not log_file.exists():
                 time.sleep(0.5)
                 continue
 
             with open(log_file, "r") as f:
                 content = f.read()
-                matches = re.findall(r"it (\d+) --", content)
+                # Find all iterations and losses
+                matches = re.findall(
+                    r"it (\d+) -- \[total loss = ([\d.e+-]+)\]", content
+                )
                 if matches:
-                    current_iter = int(matches[-1])
+                    current_iter, last_loss = matches[-1]
+                    current_iter = int(current_iter)
+
                     if current_iter > last_iter:
-                        pbar.update(current_iter - last_iter)
+                        delta = current_iter - last_iter
+                        pbar.update(delta)
+
+                        # Update overall progress (fractional trials)
+                        if last_iter < max_iters:
+                            effective_curr = min(current_iter, max_iters)
+                            overall_pbar.update(
+                                (effective_curr - last_iter) / max_iters
+                            )
+
                         last_iter = current_iter
+                        pbar.set_postfix(loss=last_loss, refresh=False)
+                    elif current_iter < last_iter:
+                        # Handle potential log reset or multiple chunks
+                        delta = current_iter
+                        pbar.update(delta)
+                        # Don't update overall progress on resets to avoid over-counting
+                        last_iter = current_iter
+                        pbar.set_postfix(loss=last_loss, refresh=False)
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.2)  # Faster update for smoother spinner
 
-    # Final catch-up
-    if last_iter < max_iters:
-        pbar.update(max_iters - last_iter)
+    # When process finishes, fill the remaining progress for this trial
+    remaining = max_iters - last_iter
+    if remaining > 0:
+        pbar.update(remaining)
+        overall_pbar.update(remaining / max_iters)
+
+    # Final state
+    pbar.set_description(f"✔ Worker {pos:2d}: {trial_name[:15]}")
 
 
 def worker_task(task_args):
@@ -108,12 +144,15 @@ def worker_task(task_args):
         batch_size,
         vicon_up,
         vicon_forward,
-        log_path,
+        log_file_path,
         task_id,
         pbar,
+        overall_pbar,
+        trial_name,
+        pos,
     ) = task_args
 
-    log_file = Path(log_path)
+    log_file = Path(log_file_path)
 
     cmd = [
         "uv",
@@ -141,7 +180,8 @@ def worker_task(task_args):
     try:
         # Start monitoring thread for this task
         monitor_thread = threading.Thread(
-            target=update_individual_progress, args=(log_file, task_id, pbar)
+            target=update_individual_progress,
+            args=(log_file, task_id, pbar, overall_pbar, trial_name, pos),
         )
         monitor_thread.daemon = True
 
@@ -276,9 +316,14 @@ def main():
     )
 
     # Use tqdm nested progress bars
-    # Main bar at position 0
+    # Main bar at position 0, total = num_trials (but we update by 1/max_iters increments)
     main_pbar = tqdm(
-        total=len(tasks_data), desc="Overall Progress", position=0, leave=True
+        total=len(tasks_data),
+        desc="Overall Fitting Progress",
+        position=0,
+        leave=True,
+        unit="trial",
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n:.2f}/{total_fmt} trials [{elapsed}<{remaining}, {rate_fmt}]",
     )
 
     # We maintain a pool of worker bars at positions 1 to num_workers
@@ -291,11 +336,13 @@ def main():
 
         with pos_lock:
             pos = available_positions.pop(0)
+            # Worker bar uses spinner-like format with total=None
             pbar = tqdm(
-                total=max_iters,
+                total=None,
                 desc=f"Worker {pos:2d}: {t['trial_name'][:15]}",
                 position=pos,
                 leave=False,
+                bar_format="{desc}: {n_fmt}it {postfix} [{elapsed}]",
             )
 
         try:
@@ -310,6 +357,9 @@ def main():
                 t["log_path"],
                 task_idx,
                 pbar,
+                main_pbar,
+                t["trial_name"],
+                pos,
             )
             res = worker_task(arg)
             return res
@@ -324,7 +374,6 @@ def main():
         for future in as_completed(futures):
             if future.result():
                 success_count += 1
-            main_pbar.update(1)
 
     main_pbar.close()
 
