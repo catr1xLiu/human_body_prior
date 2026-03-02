@@ -33,6 +33,8 @@ dependencies = [
   "smplx>=0.1.28",
   "colour>=0.1.5",
   "progressbar2>=4.5.0",
+  "jupyter>=1.1.1",
+  "matplotlib>=3.10.8",
 ]
 
 [[tool.uv.index]]
